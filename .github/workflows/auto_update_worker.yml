@@ -25,7 +25,7 @@ jobs:
 
       - name: 设置环境变量
         run: |
-          echo "REPO_URL=https://api.github.com/repos/bia-pain-bache/BPB-Worker-Panel/releases" >> $GITHUB_ENV
+          echo "API_URL=https://api.github.com/repos/bia-pain-bache/BPB-Worker-Panel/releases/latest" >> $GITHUB_ENV
           echo "TARGET_FILE=worker.zip" >> $GITHUB_ENV
 
       - name: 检查并更新 Worker
@@ -41,11 +41,11 @@ jobs:
           LOCAL_VERSION=$(cat version.txt 2>/dev/null || echo "")
           log "本地版本: ${LOCAL_VERSION:-无}"
 
-          # 获取最新 Release 信息
-          log "获取最新 Release..."
-          RESPONSE=$(curl -s --retry 3 -H "Authorization: token $GITHUB_TOKEN" -H "Accept: application/vnd.github.v3+json" "$REPO_URL")
-          TAG_NAME=$(echo "$RESPONSE" | jq -r '.[0].tag_name')
-          DOWNLOAD_URL=$(echo "$RESPONSE" | jq -r '.[0].assets[] | select(.name == "'"$TARGET_FILE"'") | .browser_download_url')
+          # 获取最新正式 Release
+          log "获取最新正式 Release..."
+          RESPONSE=$(curl -s --retry 3 -H "Authorization: token $GITHUB_TOKEN" -H "Accept: application/vnd.github.v3+json" "$API_URL")
+          TAG_NAME=$(echo "$RESPONSE" | jq -r '.tag_name')
+          DOWNLOAD_URL=$(echo "$RESPONSE" | jq -r '.assets[] | select(.name == "'"$TARGET_FILE"'") | .browser_download_url')
 
           if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" == "null" ]; then
             log "ERROR: 未找到 $TARGET_FILE"
@@ -62,7 +62,7 @@ jobs:
             exit 0
           fi
 
-          # 下载和解压处理
+          # 下载并解压 .js 文件
           log "下载 $TARGET_FILE..."
           wget -q -O "$TARGET_FILE" "$DOWNLOAD_URL"
 

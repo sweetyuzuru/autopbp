@@ -1,4 +1,4 @@
-name: Fetch, Obfuscate and Commit BPB Panel
+name: Fetch, Obfuscate pbpbpb 
 
 on:
   push:

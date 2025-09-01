@@ -1,82 +1,109 @@
-name: Auto Update Worker
+name: Fetch, Obfuscate and Commit BPB Panel
 
 on:
   push:
     branches:
       - main
+  workflow_dispatch:  # 允许手动触发
   schedule:
-    - cron: "0 1 * * *" # 每天凌晨1点运行
-  workflow_dispatch:
-    inputs:
-      force_update:
-        description: '是否强制更新（忽略版本检查）'
-        required: false
-        default: 'false'
+    # 每天凌晨1:00运行
+    - cron: "0 1 * * *"
 
 permissions:
   contents: write
 
 jobs:
-  update:
+  fetch-and-obfuscate:
     runs-on: ubuntu-latest
+
     steps:
-      - name: 检出仓库
+      - name: 检出代码
         uses: actions/checkout@v4
 
-      - name: 设置环境
+      - name: 设置 Node.js 环境
+        uses: actions/setup-node@v4
+        with:
+          node-version: "latest"
+
+      - name: 安装依赖项
         run: |
-          echo "REPO_URL=https://api.github.com/repos/bia-pain-bache/BPB-Worker-Panel/releases" >> $GITHUB_ENV
-          echo "TARGET_FILE=worker.zip" >> $GITHUB_ENV
+          npm install -g javascript-obfuscator
 
-      - name: 检查并更新 Worker
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # 使用 GitHub Token 认证
+      - name: 获取最新发布信息
+        id: release_info
         run: |
-          # 日志函数
-          log() { echo "[$(date +'%Y-%m-%d %H:%M:%S')] $1"; }
+          # 获取最新发布版本信息
+          response=$(curl -s https://api.github.com/repos/bia-pain-bache/BPB-Worker-Panel/releases/latest)
+          tag_name=$(echo $response | jq -r '.tag_name')
+          echo "Latest release: $tag_name"
+          echo "tag_name=$tag_name" >> $GITHUB_OUTPUT
+          
+          # 查找 worker.js 资源
+          asset_url=$(echo $response | jq -r '.assets[] | select(.name == "worker.js") | .browser_download_url')
+          
+          if [ -z "$asset_url" ]; then
+            echo "worker.js not found in assets, checking source code archives..."
+            # 如果没有单独的 worker.js 资源，则查找源代码压缩包
+            asset_url=$(echo $response | jq -r '.assets[] | select(.name | endswith(".zip")) | .browser_download_url')
+            if [ -z "$asset_url" ]; then
+              echo "No suitable asset found"
+              exit 1
+            fi
+            echo "asset_url=$asset_url" >> $GITHUB_OUTPUT
+            echo "asset_type=archive" >> $GITHUB_OUTPUT
+          else
+            echo "asset_url=$asset_url" >> $GITHUB_OUTPUT
+            echo "asset_type=direct" >> $GITHUB_OUTPUT
+          fi
 
-          log "开始检查更新..."
-
-          # 获取本地版本
-          LOCAL_VERSION=$(cat version.txt 2>/dev/null || echo "")
-          log "本地版本: ${LOCAL_VERSION:-无}"
-
-          # 获取最新 Release
-          log "获取最新 Release 信息..."
-          RESPONSE=$(curl -s --retry 3 -H "Authorization: token $GITHUB_TOKEN" -H "Accept: application/vnd.github.v3+json" "$REPO_URL")
-          if [ $? -ne 0 ]; then
-            log "ERROR: 无法访问 GitHub API"
+      - name: 下载 worker.js
+        run: |
+          if [ "${{ steps.release_info.outputs.asset_type }}" == "direct" ]; then
+            # 直接下载 worker.js
+            curl -L -o origin.js "${{ steps.release_info.outputs.asset_url }}"
+          else
+            # 下载并解压源代码包
+            curl -L -o source.zip "${{ steps.release_info.outputs.asset_url }}"
+            unzip -j source.zip "worker.js" -d ./
+            mv worker.js origin.js
+            rm source.zip
+          fi
+          
+          # 验证文件是否下载成功
+          if [ ! -f "origin.js" ]; then
+            echo "origin.js not found after download"
             exit 1
           fi
+          
+          echo "Downloaded worker.js successfully from version ${{ steps.release_info.outputs.tag_name }}"
+          ls -la origin.js
 
-          TAG_NAME=$(echo "$RESPONSE" | jq -r '.[0].tag_name')
-          DOWNLOAD_URL=$(echo "$RESPONSE" | jq -r '.[0].assets[] | select(.name == "'"$TARGET_FILE"'") | .browser_download_url')
-
-          if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" == "null" ]; then
-            log "ERROR: 未找到 $TARGET_FILE"
-            exit 1
-          fi
-          log "最新版本: $TAG_NAME"
-
-          # 判断是否需要更新
-          FORCE_UPDATE=${{ github.event.inputs.force_update || 'false' }}
-          if [ "$LOCAL_VERSION" = "$TAG_NAME" ] && [ "$FORCE_UPDATE" != "true" ]; then
-            log "已是最新版本，无需更新"
-            exit 0
-          fi
-
-          # 下载并更新
-          log "下载 $TARGET_FILE..."
-          wget -q -O "$TARGET_FILE" "$DOWNLOAD_URL"
-          log "解压 $TARGET_FILE..."
-          unzip -o "$TARGET_FILE"
-          rm "$TARGET_FILE"
-          echo "$TAG_NAME" > version.txt
-          log "更新完成，新版本: $TAG_NAME"
+      - name: 混淆 worker.js
+        run: |
+          javascript-obfuscator origin.js --output _worker.js \
+            --compact true \
+            --control-flow-flattening false \
+            --dead-code-injection false \
+            --identifier-names-generator mangled \
+            --rename-globals false \
+            --string-array true \
+            --string-array-encoding 'rc4' \
+            --string-array-threshold 0.75 \
+            --transform-object-keys true \
+            --unicode-escape-sequence true
+          
+          # 添加版本信息注释
+          echo "// Source: BPB-Worker-Panel ${{ steps.release_info.outputs.tag_name }} - Obfuscated on $(date +%Y-%m-%d)" > temp.js
+          cat _worker.js >> temp.js
+          mv temp.js _worker.js
+          
+          echo "Obfuscation completed"
+          ls -la _worker.js
 
       - name: 提交更改
-        if: success() # 仅在更新成功时提交
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "🔄 自动同步 Worker 版本: ${{ steps.check_update.outputs.tag_name || '未知' }}"
+          branch: main
+          commit_message: ":arrow_up: 更新 BPB 面板到版本 ${{ steps.release_info.outputs.tag_name }}"
           commit_author: "github-actions[bot] <github-actions[bot]@users.noreply.github.com>"
+          file_pattern: "_worker.js"
